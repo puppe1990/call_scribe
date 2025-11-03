@@ -13,6 +13,7 @@ import os
 import threading
 import time
 import sys
+import glob
 
 class CallRecorder:
     def __init__(self, model_name="base", language="pt"):
@@ -39,21 +40,30 @@ class CallRecorder:
         # Language setting (default: Portuguese)
         self.language = language
         
+        # Model setting (default: base)
+        self.model_name = model_name
+        self.model = None
+        
         # Create audio folder if it doesn't exist
         self.audio_folder = "audio"
         os.makedirs(self.audio_folder, exist_ok=True)
         
         # Initialize Whisper model
-        print(f"📥 Loading Whisper model '{model_name}'...")
-        print("   (This only happens once per session - faster models load quicker)")
+        self._load_model()
+    
+    def _load_model(self):
+        """Load or reload the Whisper model"""
+        print(f"📥 Loading Whisper model '{self.model_name}'...")
+        print("   (This may take a moment - faster models load quicker)")
         self._start_loader("Loading Whisper model...")
         
         # Load model with device optimization (use GPU if available)
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = whisper.load_model(model_name, device=device)
+        self.model = whisper.load_model(self.model_name, device=device)
         
         self._stop_loader()
         print(f"✅ Model loaded successfully! (device: {device})")
+        print(f"🤖 Model: {self.model_name}")
         print(f"🌐 Language: {self._get_language_name(self.language)}")
         print(f"💡 Tip: Model is now cached in memory - subsequent recordings will be instant!")
         
@@ -322,6 +332,32 @@ class CallRecorder:
             print(f"Available languages: {', '.join(sorted(whisper.tokenizer.LANGUAGES.keys()))}")
             return False
     
+    def set_model(self, model_name):
+        """Change the Whisper model"""
+        valid_models = ['tiny', 'base', 'small', 'medium', 'large', 'turbo']
+        if model_name.lower() in valid_models:
+            if self.is_recording:
+                print("⚠️  Cannot change model while recording. Stop recording first.")
+                return False
+            
+            old_model = self.model_name
+            self.model_name = model_name.lower()
+            
+            print(f"\n🔄 Changing model from '{old_model}' to '{self.model_name}'...")
+            self._load_model()
+            return True
+        else:
+            print(f"❌ Invalid model name: {model_name}")
+            print(f"Available models: {', '.join(valid_models)}")
+            print("\nModel descriptions:")
+            print("  tiny   - Fastest, least accurate (~1 GB VRAM)")
+            print("  base   - Fast, less accurate (~1 GB VRAM)")
+            print("  small  - Balanced (~2 GB VRAM)")
+            print("  medium - More accurate (~5 GB VRAM)")
+            print("  large  - Most accurate (~10 GB VRAM)")
+            print("  turbo  - Optimized for speed (~6 GB VRAM)")
+            return False
+    
     def _get_language_name(self, code):
         """Get language name from code"""
         language_names = {
@@ -337,6 +373,118 @@ class CallRecorder:
             "ru": "Russian",
         }
         return language_names.get(code, whisper.tokenizer.LANGUAGES.get(code, code))
+    
+    def _get_audio_files(self, folder_path):
+        """Get all audio files from a folder"""
+        audio_extensions = ['*.wav', '*.mp3', '*.m4a', '*.flac', '*.ogg', '*.wma']
+        audio_files = []
+        for ext in audio_extensions:
+            audio_files.extend(glob.glob(os.path.join(folder_path, ext)))
+            audio_files.extend(glob.glob(os.path.join(folder_path, ext.upper())))
+        return sorted(audio_files)
+    
+    def _list_folders(self, base_path):
+        """List all folders in a directory"""
+        folders = []
+        if os.path.exists(base_path):
+            for item in os.listdir(base_path):
+                item_path = os.path.join(base_path, item)
+                if os.path.isdir(item_path):
+                    folders.append(item)
+        return sorted(folders)
+    
+    def transcribe_file(self, audio_file_path, output_path=None, title=None):
+        """Transcribe an existing audio file"""
+        if not os.path.exists(audio_file_path):
+            print(f"❌ File not found: {audio_file_path}")
+            return False
+        
+        if not os.path.isfile(audio_file_path):
+            print(f"❌ Path is not a file: {audio_file_path}")
+            return False
+        
+        # Check if it's an audio file
+        audio_extensions = ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.wma']
+        file_ext = os.path.splitext(audio_file_path)[1].lower()
+        if file_ext not in audio_extensions:
+            print(f"❌ File is not a supported audio format: {file_ext}")
+            print(f"Supported formats: {', '.join(audio_extensions)}")
+            return False
+        
+        # Determine output path
+        if output_path is None:
+            base_dir = os.path.dirname(audio_file_path)
+            base_name = os.path.splitext(os.path.basename(audio_file_path))[0]
+            output_path = os.path.join(base_dir, f"{base_name}_transcript.txt")
+        
+        try:
+            print(f"\n📊 Processing audio file: {os.path.basename(audio_file_path)}")
+            print(f"🗣️  Converting speech to text ({self._get_language_name(self.language)})...")
+            
+            # Start loader for transcription
+            self._start_loader("🎯 Transcribing audio (this may take a moment)...")
+            
+            # Transcribe using Whisper model with specified language
+            result = self.model.transcribe(audio_file_path, language=self.language)
+            text = result["text"].strip()
+            
+            self._stop_loader()
+            
+            # Start loader for saving transcript
+            self._start_loader("💾 Saving transcript...")
+            
+            # Save transcript to file
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(f"Audio Transcript - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Audio file: {audio_file_path}\n")
+                if title:
+                    f.write(f"Title: {title}\n")
+                f.write("="*60 + "\n\n")
+                f.write(text)
+                f.write("\n\n" + "="*60)
+            
+            self._stop_loader()
+            
+            print(f"✅ Transcription complete!")
+            print(f"📁 Transcript saved: {output_path}")
+            print(f"\n📄 Transcript preview:")
+            print("-" * 60)
+            print(text[:300] + ("..." if len(text) > 300 else ""))
+            print("-" * 60)
+            return True
+                
+        except Exception as e:
+            self._stop_loader()
+            print(f"❌ Error during transcription: {e}")
+            return False
+    
+    def transcribe_folder(self, folder_path, title=None):
+        """Transcribe all audio files in a folder"""
+        if not os.path.exists(folder_path):
+            print(f"❌ Folder not found: {folder_path}")
+            return False
+        
+        if not os.path.isdir(folder_path):
+            print(f"❌ Path is not a folder: {folder_path}")
+            return False
+        
+        audio_files = self._get_audio_files(folder_path)
+        
+        if not audio_files:
+            print(f"❌ No audio files found in: {folder_path}")
+            return False
+        
+        print(f"\n📁 Found {len(audio_files)} audio file(s) in folder")
+        print(f"📂 Folder: {folder_path}\n")
+        
+        for i, audio_file in enumerate(audio_files, 1):
+            print(f"\n[{i}/{len(audio_files)}] Processing: {os.path.basename(audio_file)}")
+            base_name = os.path.splitext(os.path.basename(audio_file))[0]
+            output_path = os.path.join(folder_path, f"{base_name}_transcript.txt")
+            self.transcribe_file(audio_file, output_path, title)
+        
+        print(f"\n✅ Finished transcribing {len(audio_files)} file(s)")
+        return True
     
     def cleanup(self):
         """Clean up audio resources"""
@@ -357,10 +505,12 @@ def main():
     
     try:
         print("Commands:")
-        print("  'start'    - Begin recording")
-        print("  'stop'     - Stop recording and transcribe")
-        print("  'language' - Change transcription language")
-        print("  'quit'     - Exit program\n")
+        print("  'start'     - Begin recording")
+        print("  'stop'      - Stop recording and transcribe")
+        print("  'transcribe' - Transcribe existing audio file/folder")
+        print("  'language'  - Change transcription language")
+        print("  'model'     - Change Whisper model")
+        print("  'quit'      - Exit program\n")
         
         while True:
             command = input("Enter command: ").strip().lower()
@@ -376,6 +526,79 @@ def main():
                 recorder.start_recording(title if title else None)
             elif command == 'stop':
                 recorder.stop_recording()
+            elif command == 'transcribe' or command == 'transcrever':
+                print("\n📁 Transcribe existing audio file or folder")
+                print("\nOptions:")
+                print("  1. Transcribe a specific audio file")
+                print("  2. Transcribe all audio files in a folder")
+                print("  3. Browse folders in audio directory")
+                
+                choice = input("\nEnter option (1/2/3): ").strip()
+                
+                if choice == '1':
+                    file_path = input("\nEnter path to audio file: ").strip()
+                    if file_path:
+                        # Expand user path and resolve
+                        file_path = os.path.expanduser(file_path)
+                        file_path = os.path.abspath(file_path)
+                        
+                        print("\n📝 Enter title (optional, press Enter to skip):")
+                        title = input("Title: ").strip() or None
+                        
+                        recorder.transcribe_file(file_path, title=title)
+                    else:
+                        print("❌ No file path provided")
+                
+                elif choice == '2':
+                    folder_path = input("\nEnter path to folder: ").strip()
+                    if folder_path:
+                        # Expand user path and resolve
+                        folder_path = os.path.expanduser(folder_path)
+                        folder_path = os.path.abspath(folder_path)
+                        
+                        print("\n📝 Enter title (optional, press Enter to skip):")
+                        title = input("Title: ").strip() or None
+                        
+                        recorder.transcribe_folder(folder_path, title=title)
+                    else:
+                        print("❌ No folder path provided")
+                
+                elif choice == '3':
+                    # Browse folders in audio directory
+                    base_folder = recorder.audio_folder
+                    folders = recorder._list_folders(base_folder)
+                    
+                    if not folders:
+                        print(f"\n❌ No folders found in {base_folder}")
+                        continue
+                    
+                    print(f"\n📂 Available folders in '{base_folder}':")
+                    for i, folder in enumerate(folders, 1):
+                        folder_path = os.path.join(base_folder, folder)
+                        audio_files = recorder._get_audio_files(folder_path)
+                        print(f"  {i}. {folder} ({len(audio_files)} audio file(s))")
+                    
+                    folder_input = input("\nEnter folder number or name: ").strip()
+                    
+                    selected_folder = None
+                    if folder_input.isdigit():
+                        idx = int(folder_input) - 1
+                        if 0 <= idx < len(folders):
+                            selected_folder = folders[idx]
+                    else:
+                        if folder_input in folders:
+                            selected_folder = folder_input
+                    
+                    if selected_folder:
+                        folder_path = os.path.join(base_folder, selected_folder)
+                        print("\n📝 Enter title (optional, press Enter to skip):")
+                        title = input("Title: ").strip() or None
+                        recorder.transcribe_folder(folder_path, title=title)
+                    else:
+                        print("❌ Invalid folder selection")
+                else:
+                    print("❌ Invalid option")
+            
             elif command == 'language' or command == 'lang':
                 print(f"\nCurrent language: {recorder._get_language_name(recorder.language)}")
                 print("\nCommon languages:")
@@ -398,12 +621,23 @@ def main():
                     print()
                 else:
                     recorder.set_language(lang_input)
+            elif command == 'model' or command == 'modelo':
+                print(f"\nCurrent model: {recorder.model_name}")
+                print("\nAvailable models:")
+                print("  tiny   - Fastest, least accurate (~1 GB VRAM)")
+                print("  base   - Fast, less accurate (~1 GB VRAM) [Default]")
+                print("  small  - Balanced (~2 GB VRAM)")
+                print("  medium - More accurate (~5 GB VRAM)")
+                print("  large  - Most accurate (~10 GB VRAM)")
+                print("  turbo  - Optimized for speed (~6 GB VRAM)")
+                model_input = input("\nEnter model name: ").strip().lower()
+                recorder.set_model(model_input)
             elif command == 'quit' or command == 'exit':
                 if recorder.is_recording:
                     recorder.stop_recording()
                 break
             else:
-                print("❌ Unknown command. Use: start, stop, language, or quit")
+                print("❌ Unknown command. Use: start, stop, transcribe, language, model, or quit")
                 
     except KeyboardInterrupt:
         print("\n\n⚠️  Interrupted by user")
