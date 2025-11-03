@@ -22,6 +22,9 @@ class CallRecorder:
         self.recording_folder = None
         self.start_time = None
         self.timer_thread = None
+        self.loader_active = False
+        self.loader_thread = None
+        self.call_title = None
         
         # Audio settings
         self.CHUNK = 1024
@@ -42,19 +45,34 @@ class CallRecorder:
         # Initialize Whisper model
         print(f"📥 Loading Whisper model '{model_name}'...")
         print("   (This may take a moment on first run as the model downloads)")
+        self._start_loader("Loading Whisper model...")
         self.model = whisper.load_model(model_name)
+        self._stop_loader()
         print(f"✅ Model loaded successfully!")
         print(f"🌐 Language: {self._get_language_name(self.language)}")
         
-    def start_recording(self):
+    def start_recording(self, title=None):
         """Start recording audio from microphone"""
         if self.is_recording:
             print("⚠️  Already recording!")
             return
-            
+        
+        # Store call title
+        self.call_title = title.strip() if title and title.strip() else None
+        
         # Create unique folder for this recording with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.recording_folder = os.path.join(self.audio_folder, f"call_{timestamp}")
+        
+        # Use title in folder name if provided, otherwise just use timestamp
+        if self.call_title:
+            # Sanitize title for folder name (remove invalid characters)
+            safe_title = "".join(c for c in self.call_title if c.isalnum() or c in (' ', '-', '_')).strip()
+            safe_title = safe_title.replace(' ', '_')[:50]  # Limit length and replace spaces
+            folder_name = f"call_{timestamp}_{safe_title}"
+        else:
+            folder_name = f"call_{timestamp}"
+        
+        self.recording_folder = os.path.join(self.audio_folder, folder_name)
         os.makedirs(self.recording_folder, exist_ok=True)
         
         # Create filenames with timestamp inside the unique folder
@@ -76,6 +94,8 @@ class CallRecorder:
         print("\n" + "="*60)
         print("🔴 RECORDING IN PROGRESS")
         print("="*60)
+        if self.call_title:
+            print(f"📝 Call title: {self.call_title}")
         print(f"📁 Recording folder: {self.recording_folder}")
         print(f"📁 Audio file: {self.audio_filename}")
         print(f"📝 Transcript file: {self.transcript_filename}")
@@ -167,28 +187,61 @@ class CallRecorder:
         self._save_audio()
         
         # Transcribe audio
-        print("🎯 Transcribing audio...")
         self._transcribe_audio()
         
         print("\n" + "="*60)
         print("✅ RECORDING COMPLETE")
         print("="*60)
+        if self.call_title:
+            print(f"📝 Call title: {self.call_title}")
         print(f"📁 Recording folder: {self.recording_folder}")
         print(f"📁 Audio saved: {self.audio_filename}")
         print(f"📝 Transcript saved: {self.transcript_filename}")
         print("="*60 + "\n")
         
+    def _show_loader(self, message):
+        """Display a loading spinner"""
+        spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        i = 0
+        try:
+            while self.loader_active:
+                spinner = spinner_chars[i % len(spinner_chars)]
+                sys.stdout.write(f'\r{spinner} {message}')
+                sys.stdout.flush()
+                i += 1
+                time.sleep(0.1)
+            # Clear the loader line
+            sys.stdout.write('\r' + ' ' * (len(message) + 10) + '\r')
+            sys.stdout.flush()
+        except Exception:
+            pass
+    
+    def _start_loader(self, message):
+        """Start a loading spinner in a separate thread"""
+        self.loader_active = True
+        self.loader_thread = threading.Thread(target=self._show_loader, args=(message,), daemon=True)
+        self.loader_thread.start()
+    
+    def _stop_loader(self):
+        """Stop the loading spinner"""
+        self.loader_active = False
+        if self.loader_thread:
+            self.loader_thread.join(timeout=0.5)
+    
     def _save_audio(self):
         """Save recorded audio to WAV file"""
         try:
+            self._start_loader("💾 Saving audio file...")
             wf = wave.open(self.audio_filename, 'wb')
             wf.setnchannels(self.CHANNELS)
             wf.setsampwidth(self.audio.get_sample_size(self.FORMAT))
             wf.setframerate(self.RATE)
             wf.writeframes(b''.join(self.frames))
             wf.close()
+            self._stop_loader()
             print(f"💾 Audio saved successfully")
         except Exception as e:
+            self._stop_loader()
             print(f"❌ Error saving audio: {e}")
             
     def _transcribe_audio(self):
@@ -197,16 +250,28 @@ class CallRecorder:
             print(f"📊 Processing audio with Whisper...")
             print(f"🗣️  Converting speech to text ({self._get_language_name(self.language)})...")
             
+            # Start loader for transcription
+            self._start_loader("🎯 Transcribing audio (this may take a moment)...")
+            
             # Transcribe using Whisper model with specified language
             result = self.model.transcribe(self.audio_filename, language=self.language)
             text = result["text"].strip()
             
+            self._stop_loader()
+            
+            # Start loader for saving transcript
+            self._start_loader("💾 Saving transcript...")
+            
             # Save transcript to file
             with open(self.transcript_filename, 'w', encoding='utf-8') as f:
                 f.write(f"Call Transcript - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                if self.call_title:
+                    f.write(f"Title: {self.call_title}\n")
                 f.write("="*60 + "\n\n")
                 f.write(text)
                 f.write("\n\n" + "="*60)
+            
+            self._stop_loader()
             
             print(f"✅ Transcription complete!")
             print(f"\n📄 Transcript preview:")
@@ -215,6 +280,7 @@ class CallRecorder:
             print("-" * 60)
                 
         except Exception as e:
+            self._stop_loader()
             print(f"❌ Error during transcription: {e}")
             with open(self.transcript_filename, 'w', encoding='utf-8') as f:
                 f.write(f"Error transcribing audio: {str(e)}")
@@ -274,7 +340,14 @@ def main():
             command = input("Enter command: ").strip().lower()
             
             if command == 'start':
-                recorder.start_recording()
+                # Ask for call title (optional)
+                print("\n📝 Enter call title (optional, press Enter to skip):")
+                title = input("Title: ").strip()
+                if not title:
+                    print("ℹ️  Starting recording without title...")
+                else:
+                    print(f"✅ Title set: {title}")
+                recorder.start_recording(title if title else None)
             elif command == 'stop':
                 recorder.stop_recording()
             elif command == 'language' or command == 'lang':
