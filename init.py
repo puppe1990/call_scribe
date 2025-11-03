@@ -7,6 +7,7 @@ Shows clear visual indicators when recording is active.
 import pyaudio
 import wave
 import whisper
+import torch
 from datetime import datetime
 import os
 import threading
@@ -14,7 +15,7 @@ import time
 import sys
 
 class CallRecorder:
-    def __init__(self, model_name="turbo", language="pt"):
+    def __init__(self, model_name="base", language="pt"):
         self.is_recording = False
         self.audio_filename = None
         self.transcript_filename = None
@@ -44,12 +45,17 @@ class CallRecorder:
         
         # Initialize Whisper model
         print(f"📥 Loading Whisper model '{model_name}'...")
-        print("   (This may take a moment on first run as the model downloads)")
+        print("   (This only happens once per session - faster models load quicker)")
         self._start_loader("Loading Whisper model...")
-        self.model = whisper.load_model(model_name)
+        
+        # Load model with device optimization (use GPU if available)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = whisper.load_model(model_name, device=device)
+        
         self._stop_loader()
-        print(f"✅ Model loaded successfully!")
+        print(f"✅ Model loaded successfully! (device: {device})")
         print(f"🌐 Language: {self._get_language_name(self.language)}")
+        print(f"💡 Tip: Model is now cached in memory - subsequent recordings will be instant!")
         
     def start_recording(self, title=None):
         """Start recording audio from microphone"""
@@ -107,9 +113,6 @@ class CallRecorder:
         self.timer_thread = threading.Thread(target=self._display_timer, daemon=True)
         self.timer_thread.start()
         
-        # Print initial timer line
-        print("⏱️  Recording time: 00:00")
-        
         # Start recording in a separate thread
         self.recording_thread = threading.Thread(target=self._record)
         self.recording_thread.start()
@@ -117,6 +120,7 @@ class CallRecorder:
     def _display_timer(self):
         """Display recording timer in real-time"""
         try:
+            first_print = True
             while self.is_recording:
                 elapsed = time.time() - self.start_time
                 hours = int(elapsed // 3600)
@@ -128,8 +132,12 @@ class CallRecorder:
                 else:
                     timer_str = f"⏱️  Recording time: {minutes:02d}:{seconds:02d}"
                 
-                # Overwrite the previous timer line
-                sys.stdout.write('\r' + timer_str + ' ' * 20)  # Clear remaining chars
+                # Overwrite the previous timer line (or print first time)
+                if first_print:
+                    sys.stdout.write(timer_str + ' ' * 20)
+                    first_print = False
+                else:
+                    sys.stdout.write('\r' + timer_str + ' ' * 20)  # Clear remaining chars
                 sys.stdout.flush()
                 
                 time.sleep(1)  # Update every second
@@ -200,30 +208,48 @@ class CallRecorder:
         print("="*60 + "\n")
         
     def _show_loader(self, message):
-        """Display a loading spinner"""
-        spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-        i = 0
+        """Display a loading percentage"""
+        percentage = 0
+        start_time = time.time()
         try:
             while self.loader_active:
-                spinner = spinner_chars[i % len(spinner_chars)]
-                sys.stdout.write(f'\r{spinner} {message}')
+                elapsed = time.time() - start_time
+                # Simulate progress: faster at start, slower as it approaches 100%
+                # This gives a realistic feel without actual progress tracking
+                if elapsed < 1:
+                    percentage = min(30, int(elapsed * 30))
+                elif elapsed < 3:
+                    percentage = min(70, 30 + int((elapsed - 1) * 20))
+                elif elapsed < 10:
+                    percentage = min(95, 70 + int((elapsed - 3) * 3.5))
+                else:
+                    percentage = min(99, 95 + int((elapsed - 10) * 0.5))
+                
+                bar_length = 20
+                filled = int(bar_length * percentage / 100)
+                bar = '█' * filled + '░' * (bar_length - filled)
+                sys.stdout.write(f'\r{message} [{bar}] {percentage}%')
                 sys.stdout.flush()
-                i += 1
                 time.sleep(0.1)
+            # Show 100% before clearing
+            bar = '█' * bar_length
+            sys.stdout.write(f'\r{message} [{bar}] 100%')
+            sys.stdout.flush()
+            time.sleep(0.2)
             # Clear the loader line
-            sys.stdout.write('\r' + ' ' * (len(message) + 10) + '\r')
+            sys.stdout.write('\r' + ' ' * (len(message) + 30) + '\r')
             sys.stdout.flush()
         except Exception:
             pass
     
     def _start_loader(self, message):
-        """Start a loading spinner in a separate thread"""
+        """Start a loading percentage indicator in a separate thread"""
         self.loader_active = True
         self.loader_thread = threading.Thread(target=self._show_loader, args=(message,), daemon=True)
         self.loader_thread.start()
     
     def _stop_loader(self):
-        """Stop the loading spinner"""
+        """Stop the loading percentage indicator"""
         self.loader_active = False
         if self.loader_thread:
             self.loader_thread.join(timeout=0.5)
