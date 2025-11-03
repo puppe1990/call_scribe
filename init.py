@@ -312,8 +312,23 @@ class CallRecorder:
                 if status:
                     print(f"⚠️  System audio status: {status}")
                 if self.is_recording:
-                    # Convert float32 to int16
-                    audio_data = (indata * 32767).astype(np.int16)
+                    # Handle mono channel if needed
+                    if indata.shape[1] > 1:
+                        # Convert stereo to mono by averaging channels
+                        audio_mono = np.mean(indata, axis=1, keepdims=True)
+                    else:
+                        audio_mono = indata
+                    
+                    # Apply gain boost to match perceived volume (2x gain)
+                    # This compensates for lower system audio levels
+                    audio_gained = audio_mono * 2.0
+                    
+                    # Clip to prevent distortion
+                    audio_gained = np.clip(audio_gained, -1.0, 1.0)
+                    
+                    # Convert float32 to int16 with full scale
+                    audio_data = (audio_gained * 32767).astype(np.int16)
+                    
                     # Convert to bytes
                     audio_bytes = audio_data.tobytes()
                     self.system_frames.append(audio_bytes)
@@ -489,8 +504,22 @@ class CallRecorder:
         mic_audio = mic_audio[:min_len]
         system_audio = system_audio[:min_len]
         
-        # Mix the audio (average to prevent clipping)
-        mixed = ((mic_audio.astype(np.int32) + system_audio.astype(np.int32)) // 2).astype(np.int16)
+        # Normalize both audio sources before mixing to prevent clipping
+        # Find peak levels
+        mic_peak = np.abs(mic_audio).max()
+        system_peak = np.abs(system_audio).max()
+        
+        # Normalize to prevent clipping (target peak is 80% of max to leave headroom)
+        target_peak = int(32767 * 0.8)
+        
+        if mic_peak > 0:
+            mic_audio = (mic_audio.astype(np.float32) * (target_peak / mic_peak)).astype(np.int16)
+        if system_peak > 0:
+            system_audio = (system_audio.astype(np.float32) * (target_peak / system_peak)).astype(np.int16)
+        
+        # Mix the audio (sum and clip to prevent overflow)
+        mixed = mic_audio.astype(np.int32) + system_audio.astype(np.int32)
+        mixed = np.clip(mixed, -32767, 32767).astype(np.int16)
         
         # Convert back to bytes
         return [mixed.tobytes()]
