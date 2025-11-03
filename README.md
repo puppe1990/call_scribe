@@ -4,7 +4,8 @@ A Python tool for recording audio from your microphone and automatically transcr
 
 ## Features
 
-- 🎤 **Real-time Audio Recording** - Record audio directly from your microphone
+- 🎤 **Real-time Audio Recording** - Record audio from microphone, system audio, or both
+- 🔊 **System Audio Support** - Record computer audio (calls, meetings, videos) using BlackHole on macOS
 - 🗣️ **AI-Powered Transcription** - Uses OpenAI's Whisper model for accurate speech-to-text conversion
 - 🌐 **Multi-language Support** - Defaults to Portuguese (Brazil), with support for 99+ languages
 - 📁 **Organized File Storage** - Each recording is saved in its own timestamped folder
@@ -44,6 +45,11 @@ pip install -r requirements.txt
 **macOS:**
 ```bash
 brew install portaudio ffmpeg
+
+# For system audio recording, install BlackHole:
+# 1. Download from: https://github.com/ExistentialAudio/BlackHole/releases
+# 2. Install BlackHole 2ch
+# 3. Run: ./setup_audio.sh (or use 'setup' command in the app)
 ```
 
 **Ubuntu/Debian:**
@@ -72,9 +78,13 @@ python init.py
 ```
 
 2. Use the following commands:
-   - `start` - Begin recording
+   - `start` - Begin recording (choose mic, system, or both)
    - `stop` - Stop recording and transcribe
+   - `setup` - Show system audio setup guide
+   - `devices` - List available audio devices
+   - `transcribe` - Transcribe existing audio files
    - `language` - Change transcription language
+   - `model` - Change Whisper model
    - `quit` - Exit the program
 
 ### Example Session
@@ -200,7 +210,53 @@ call_scribe/
 - Clear visual indicators
 - Automatic file organization
 
+## System Audio Setup (macOS)
+
+To record system audio (computer sound, calls, videos), you need to install and configure BlackHole:
+
+### Quick Setup
+
+1. **Install BlackHole:**
+   ```bash
+   # Download from: https://github.com/ExistentialAudio/BlackHole/releases
+   # Or run the setup script:
+   ./setup_audio.sh
+   ```
+
+2. **Configure Audio Output:**
+   
+   **Option A - Direct Output (for recording only, no sound):**
+   - System Settings > Sound > Output > BlackHole 2ch
+   
+   **Option B - Multi-Output (hear AND record simultaneously):**
+   - Open Audio MIDI Setup (Applications > Utilities)
+   - Click '+' > Create Multi-Output Device
+   - Check both: BlackHole 2ch AND your speakers/headphones
+   - System Settings > Sound > Output > Multi-Output Device
+
+3. **Verify Setup:**
+   ```bash
+   python init.py
+   # Then type: devices
+   # You should see BlackHole listed as a loopback device
+   ```
+
+### Using System Audio Recording
+
+When you start recording, choose option **3 (Both)** to record:
+- Your microphone (your voice)
+- System audio (call audio, computer sound)
+
+This ensures you capture both sides of the conversation!
+
 ## Troubleshooting
+
+### System Audio Not Working
+
+- Make sure BlackHole is installed: `./setup_audio.sh`
+- Check if BlackHole is detected: Use `devices` command in the app
+- Verify BlackHole is set as output device in System Settings
+- For Multi-Output: Make sure both devices are checked in Audio MIDI Setup
 
 ### PyAudio Installation Issues
 

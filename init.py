@@ -747,6 +747,65 @@ class CallRecorder:
         self.audio.terminate()
 
 
+def show_audio_setup_help():
+    """Show help for setting up system audio recording"""
+    print("\n" + "="*60)
+    print("🔧 SYSTEM AUDIO SETUP GUIDE")
+    print("="*60)
+    print("\n📋 To record system audio (computer sound), you need:")
+    print("\n1. Install BlackHole:")
+    print("   Download from: https://github.com/ExistentialAudio/BlackHole/releases")
+    print("   Install BlackHole 2ch (recommended)")
+    print("\n2. Configure macOS Audio:")
+    print("   Option A - Direct Output (no sound):")
+    print("   - System Settings > Sound > Output > BlackHole 2ch")
+    print("")
+    print("   Option B - Multi-Output (hear AND record):")
+    print("   - Open Audio MIDI Setup (Applications > Utilities)")
+    print("   - Click '+' > Create Multi-Output Device")
+    print("   - Check both: BlackHole 2ch AND your speakers/headphones")
+    print("   - System Settings > Sound > Output > Multi-Output Device")
+    print("\n3. Run setup script:")
+    print("   ./setup_audio.sh")
+    print("\n" + "="*60 + "\n")
+
+def check_audio_devices():
+    """Check and display available audio devices"""
+    print("\n" + "="*60)
+    print("🔍 AVAILABLE AUDIO DEVICES")
+    print("="*60)
+    
+    if SOUNDDEVICE_AVAILABLE:
+        try:
+            devices = sd.query_devices()
+            print("\n📱 Input devices (for recording):")
+            for i, device in enumerate(devices):
+                if device['max_input_channels'] > 0:
+                    loopback_indicators = ['blackhole', 'loopback', 'soundflower', 'monitor']
+                    is_loopback = any(keyword in device['name'].lower() for keyword in loopback_indicators)
+                    indicator = "✅ (Loopback)" if is_loopback else ""
+                    print(f"  [{i}] {device['name']} {indicator}")
+                    print(f"      Channels: {device['max_input_channels']}, Sample Rate: {device['default_samplerate']}")
+            
+            print("\n📢 Output devices:")
+            for i, device in enumerate(devices):
+                if device['max_output_channels'] > 0:
+                    print(f"  [{i}] {device['name']}")
+            
+            # Check for BlackHole specifically
+            has_blackhole = any('blackhole' in d['name'].lower() for d in devices if d['max_input_channels'] > 0)
+            if has_blackhole:
+                print("\n✅ BlackHole detected! System audio recording is ready.")
+            else:
+                print("\n⚠️  BlackHole not found. Install it to record system audio.")
+                print("   Download: https://github.com/ExistentialAudio/BlackHole/releases")
+        except Exception as e:
+            print(f"❌ Error checking devices: {e}")
+    else:
+        print("\n⚠️  sounddevice not available. Install with: pip install sounddevice")
+    
+    print("="*60 + "\n")
+
 def main():
     print("\n" + "="*60)
     print("🎙️  CALL RECORDING & TRANSCRIPTION TOOL")
@@ -762,6 +821,8 @@ def main():
         print("  'start'     - Begin recording")
         print("  'stop'      - Stop recording and transcribe")
         print("  'transcribe' - Transcribe existing audio file/folder")
+        print("  'setup'     - Show system audio setup guide")
+        print("  'devices'   - List available audio devices")
         print("  'language'  - Change transcription language")
         print("  'model'     - Change Whisper model")
         print("  'quit'      - Exit program\n")
@@ -891,6 +952,10 @@ def main():
                 else:
                     print("❌ Invalid option")
             
+            elif command == 'setup' or command == 'config':
+                show_audio_setup_help()
+            elif command == 'devices' or command == 'device':
+                check_audio_devices()
             elif command == 'language' or command == 'lang':
                 print(f"\nCurrent language: {recorder._get_language_name(recorder.language)}")
                 print("\nCommon languages:")
@@ -929,7 +994,7 @@ def main():
                     recorder.stop_recording()
                 break
             else:
-                print("❌ Unknown command. Use: start, stop, transcribe, language, model, or quit")
+                print("❌ Unknown command. Use: start, stop, transcribe, setup, devices, language, model, or quit")
                 
     except KeyboardInterrupt:
         print("\n\n⚠️  Interrupted by user")
