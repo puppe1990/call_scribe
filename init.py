@@ -11,6 +11,7 @@ from datetime import datetime
 import os
 import threading
 import time
+import sys
 
 class CallRecorder:
     def __init__(self, model_name="turbo", language="pt"):
@@ -19,6 +20,8 @@ class CallRecorder:
         self.transcript_filename = None
         self.frames = []
         self.recording_folder = None
+        self.start_time = None
+        self.timer_thread = None
         
         # Audio settings
         self.CHUNK = 1024
@@ -77,12 +80,42 @@ class CallRecorder:
         print(f"📁 Audio file: {self.audio_filename}")
         print(f"📝 Transcript file: {self.transcript_filename}")
         print("⏸️  Press Ctrl+C or type 'stop' to end recording")
-        print("="*60 + "\n")
+        print("="*60)
+        
+        # Start timer
+        self.start_time = time.time()
+        self.timer_thread = threading.Thread(target=self._display_timer, daemon=True)
+        self.timer_thread.start()
+        
+        # Print initial timer line
+        print("⏱️  Recording time: 00:00")
         
         # Start recording in a separate thread
         self.recording_thread = threading.Thread(target=self._record)
         self.recording_thread.start()
         
+    def _display_timer(self):
+        """Display recording timer in real-time"""
+        try:
+            while self.is_recording:
+                elapsed = time.time() - self.start_time
+                hours = int(elapsed // 3600)
+                minutes = int((elapsed % 3600) // 60)
+                seconds = int(elapsed % 60)
+                
+                if hours > 0:
+                    timer_str = f"⏱️  Recording time: {hours:02d}:{minutes:02d}:{seconds:02d}"
+                else:
+                    timer_str = f"⏱️  Recording time: {minutes:02d}:{seconds:02d}"
+                
+                # Overwrite the previous timer line
+                sys.stdout.write('\r' + timer_str + ' ' * 20)  # Clear remaining chars
+                sys.stdout.flush()
+                
+                time.sleep(1)  # Update every second
+        except Exception:
+            pass  # Ignore errors when stopping
+    
     def _record(self):
         """Internal method to record audio"""
         try:
@@ -98,12 +131,32 @@ class CallRecorder:
             print("⚠️  Not currently recording!")
             return
             
+        # Clear timer line before stopping
+        sys.stdout.write('\r' + ' ' * 80 + '\r')
+        sys.stdout.flush()
+        
         print("\n⏹️  Stopping recording...")
         self.is_recording = False
+        
+        # Calculate final duration
+        if self.start_time:
+            duration = time.time() - self.start_time
+            hours = int(duration // 3600)
+            minutes = int((duration % 3600) // 60)
+            seconds = int(duration % 60)
+            if hours > 0:
+                duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            else:
+                duration_str = f"{minutes:02d}:{seconds:02d}"
+            print(f"⏱️  Total recording time: {duration_str}")
         
         # Wait for recording thread to finish
         if self.recording_thread:
             self.recording_thread.join()
+        
+        # Wait for timer thread to finish
+        if self.timer_thread:
+            self.timer_thread.join(timeout=1)
         
         # Close stream
         if self.stream:
