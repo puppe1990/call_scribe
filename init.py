@@ -14,6 +14,16 @@ import threading
 import time
 import sys
 import glob
+import numpy as np
+
+# Try to import sounddevice for system audio recording
+try:
+    import sounddevice as sd
+    SOUNDDEVICE_AVAILABLE = True
+except ImportError:
+    SOUNDDEVICE_AVAILABLE = False
+    print("⚠️  sounddevice not available. System audio recording will be limited.")
+    print("   Install with: pip install sounddevice")
 
 class CallRecorder:
     def __init__(self, model_name="base", language="pt"):
@@ -37,6 +47,12 @@ class CallRecorder:
         self.audio = pyaudio.PyAudio()
         self.stream = None
         
+        # Audio source settings
+        self.audio_source = "both"  # "mic", "system", or "both"
+        self.mic_stream = None
+        self.system_stream = None
+        self.system_frames = []
+        
         # Language setting (default: Portuguese)
         self.language = language
         
@@ -50,6 +66,45 @@ class CallRecorder:
         
         # Initialize Whisper model
         self._load_model()
+    
+    def _get_audio_devices(self):
+        """Get list of available audio input devices"""
+        devices = []
+        try:
+            device_count = self.audio.get_device_count()
+            for i in range(device_count):
+                info = self.audio.get_device_info_by_index(i)
+                if info['maxInputChannels'] > 0:
+                    devices.append({
+                        'index': i,
+                        'name': info['name'],
+                        'channels': info['maxInputChannels'],
+                        'sample_rate': int(info['defaultSampleRate'])
+                    })
+        except Exception as e:
+            print(f"⚠️  Error getting audio devices: {e}")
+        return devices
+    
+    def _find_loopback_device(self):
+        """Find a loopback device (like BlackHole) for system audio recording"""
+        if not SOUNDDEVICE_AVAILABLE:
+            return None
+        
+        try:
+            devices = sd.query_devices()
+            # Look for common loopback device names
+            loopback_keywords = ['blackhole', 'loopback', 'soundflower', 'monitor', 'virtual']
+            
+            for i, device in enumerate(devices):
+                device_name = device['name'].lower()
+                if device['max_input_channels'] > 0:
+                    for keyword in loopback_keywords:
+                        if keyword in device_name:
+                            return i
+        except Exception as e:
+            print(f"⚠️  Error finding loopback device: {e}")
+        
+        return None
     
     def _load_model(self):
         """Load or reload the Whisper model"""
@@ -67,11 +122,35 @@ class CallRecorder:
         print(f"🌐 Language: {self._get_language_name(self.language)}")
         print(f"💡 Tip: Model is now cached in memory - subsequent recordings will be instant!")
         
-    def start_recording(self, title=None):
-        """Start recording audio from microphone"""
+    def start_recording(self, title=None, audio_source="both"):
+        """Start recording audio from microphone, system, or both
+        
+        Args:
+            title: Optional title for the call
+            audio_source: "mic", "system", or "both" (default: "both")
+        """
         if self.is_recording:
             print("⚠️  Already recording!")
             return
+        
+        # Validate audio source
+        if audio_source not in ["mic", "system", "both"]:
+            print(f"⚠️  Invalid audio source: {audio_source}. Using 'both'.")
+            audio_source = "both"
+        
+        self.audio_source = audio_source
+        
+        # Check if system audio is requested but sounddevice is not available
+        if audio_source in ["system", "both"] and not SOUNDDEVICE_AVAILABLE:
+            print("⚠️  System audio recording requires sounddevice.")
+            print("   Install with: pip install sounddevice")
+            if audio_source == "system":
+                print("❌ Cannot record system audio. Please install sounddevice or use 'mic'.")
+                return
+            else:
+                print("⚠️  Falling back to microphone only.")
+                audio_source = "mic"
+                self.audio_source = "mic"
         
         # Store call title
         self.call_title = title.strip() if title and title.strip() else None
@@ -96,22 +175,66 @@ class CallRecorder:
         self.transcript_filename = os.path.join(self.recording_folder, f"call_transcript_{timestamp}.txt")
         
         self.frames = []
+        self.system_frames = []
         self.is_recording = True
         
-        # Open audio stream
-        self.stream = self.audio.open(
-            format=self.FORMAT,
-            channels=self.CHANNELS,
-            rate=self.RATE,
-            input=True,
-            frames_per_buffer=self.CHUNK
-        )
+        # Open microphone stream if needed
+        if audio_source in ["mic", "both"]:
+            try:
+                self.mic_stream = self.audio.open(
+                    format=self.FORMAT,
+                    channels=self.CHANNELS,
+                    rate=self.RATE,
+                    input=True,
+                    frames_per_buffer=self.CHUNK
+                )
+            except Exception as e:
+                print(f"❌ Error opening microphone: {e}")
+                self.is_recording = False
+                return
+        
+        # Open system audio stream if needed
+        if audio_source in ["system", "both"]:
+            try:
+                loopback_device = self._find_loopback_device()
+                if loopback_device is None:
+                    print("⚠️  No loopback device found (like BlackHole).")
+                    print("   For macOS, install BlackHole: https://github.com/ExistentialAudio/BlackHole")
+                    print("   Then set it as your output device in System Preferences > Sound")
+                    if audio_source == "system":
+                        print("❌ Cannot record system audio without loopback device.")
+                        self.is_recording = False
+                        if self.mic_stream:
+                            self.mic_stream.close()
+                        return
+                    else:
+                        print("⚠️  Falling back to microphone only.")
+                        self.audio_source = "mic"
+                else:
+                    # Use sounddevice for system audio recording
+                    device_info = sd.query_devices(loopback_device)
+                    print(f"📢 Using loopback device: {device_info['name']}")
+                    self.system_stream = loopback_device
+            except Exception as e:
+                print(f"❌ Error setting up system audio: {e}")
+                if audio_source == "system":
+                    self.is_recording = False
+                    if self.mic_stream:
+                        self.mic_stream.close()
+                    return
+                else:
+                    print("⚠️  Falling back to microphone only.")
+                    self.audio_source = "mic"
+        
+        # Set stream for backward compatibility
+        self.stream = self.mic_stream if self.mic_stream else None
         
         print("\n" + "="*60)
         print("🔴 RECORDING IN PROGRESS")
         print("="*60)
         if self.call_title:
             print(f"📝 Call title: {self.call_title}")
+        print(f"🎤 Audio source: {self.audio_source}")
         print(f"📁 Recording folder: {self.recording_folder}")
         print(f"📁 Audio file: {self.audio_filename}")
         print(f"📝 Transcript file: {self.transcript_filename}")
@@ -123,9 +246,21 @@ class CallRecorder:
         self.timer_thread = threading.Thread(target=self._display_timer, daemon=True)
         self.timer_thread.start()
         
-        # Start recording in a separate thread
-        self.recording_thread = threading.Thread(target=self._record)
-        self.recording_thread.start()
+        # Start recording threads
+        self.recording_threads = []
+        
+        if self.mic_stream:
+            mic_thread = threading.Thread(target=self._record_mic, daemon=True)
+            mic_thread.start()
+            self.recording_threads.append(mic_thread)
+        
+        if self.system_stream is not None:
+            system_thread = threading.Thread(target=self._record_system, daemon=True)
+            system_thread.start()
+            self.recording_threads.append(system_thread)
+        
+        # Keep reference for backward compatibility
+        self.recording_thread = self.recording_threads[0] if self.recording_threads else None
         
     def _display_timer(self):
         """Display recording timer in real-time"""
@@ -155,13 +290,45 @@ class CallRecorder:
             pass  # Ignore errors when stopping
     
     def _record(self):
-        """Internal method to record audio"""
+        """Internal method to record audio (backward compatibility)"""
+        self._record_mic()
+    
+    def _record_mic(self):
+        """Internal method to record audio from microphone"""
         try:
-            while self.is_recording:
-                data = self.stream.read(self.CHUNK, exception_on_overflow=False)
+            while self.is_recording and self.mic_stream:
+                data = self.mic_stream.read(self.CHUNK, exception_on_overflow=False)
                 self.frames.append(data)
         except Exception as e:
-            print(f"❌ Recording error: {e}")
+            print(f"❌ Microphone recording error: {e}")
+    
+    def _record_system(self):
+        """Internal method to record system audio using sounddevice"""
+        if not SOUNDDEVICE_AVAILABLE or self.system_stream is None:
+            return
+        
+        try:
+            def callback(indata, frames, time_info, status):
+                if status:
+                    print(f"⚠️  System audio status: {status}")
+                if self.is_recording:
+                    # Convert float32 to int16
+                    audio_data = (indata * 32767).astype(np.int16)
+                    # Convert to bytes
+                    audio_bytes = audio_data.tobytes()
+                    self.system_frames.append(audio_bytes)
+                return (None, sd.CallbackContinue)
+            
+            with sd.InputStream(device=self.system_stream, 
+                               channels=self.CHANNELS,
+                               samplerate=self.RATE,
+                               callback=callback,
+                               blocksize=self.CHUNK,
+                               dtype='float32'):
+                while self.is_recording:
+                    time.sleep(0.1)
+        except Exception as e:
+            print(f"❌ System audio recording error: {e}")
             
     def stop_recording(self):
         """Stop recording and save audio file"""
@@ -188,18 +355,26 @@ class CallRecorder:
                 duration_str = f"{minutes:02d}:{seconds:02d}"
             print(f"⏱️  Total recording time: {duration_str}")
         
-        # Wait for recording thread to finish
-        if self.recording_thread:
-            self.recording_thread.join()
+        # Wait for recording threads to finish
+        if hasattr(self, 'recording_threads'):
+            for thread in self.recording_threads:
+                thread.join(timeout=2)
+        elif self.recording_thread:
+            self.recording_thread.join(timeout=2)
         
         # Wait for timer thread to finish
         if self.timer_thread:
             self.timer_thread.join(timeout=1)
         
-        # Close stream
-        if self.stream:
-            self.stream.stop_stream()
-            self.stream.close()
+        # Close streams
+        if self.mic_stream:
+            self.mic_stream.stop_stream()
+            self.mic_stream.close()
+            self.mic_stream = None
+        
+        # Note: sounddevice stream is closed automatically when exiting context
+        self.system_stream = None
+        self.stream = None
         
         # Save audio file
         self._save_audio()
@@ -265,20 +440,60 @@ class CallRecorder:
             self.loader_thread.join(timeout=0.5)
     
     def _save_audio(self):
-        """Save recorded audio to WAV file"""
+        """Save recorded audio to WAV file, mixing if both sources are recorded"""
         try:
             self._start_loader("💾 Saving audio file...")
+            
+            # Determine which frames to use
+            if self.audio_source == "mic":
+                audio_frames = self.frames
+            elif self.audio_source == "system":
+                audio_frames = self.system_frames
+            else:  # both
+                # Mix microphone and system audio
+                audio_frames = self._mix_audio()
+            
             wf = wave.open(self.audio_filename, 'wb')
             wf.setnchannels(self.CHANNELS)
             wf.setsampwidth(self.audio.get_sample_size(self.FORMAT))
             wf.setframerate(self.RATE)
-            wf.writeframes(b''.join(self.frames))
+            wf.writeframes(b''.join(audio_frames))
             wf.close()
             self._stop_loader()
             print(f"💾 Audio saved successfully")
         except Exception as e:
             self._stop_loader()
             print(f"❌ Error saving audio: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _mix_audio(self):
+        """Mix microphone and system audio frames"""
+        if not self.frames and not self.system_frames:
+            return []
+        
+        if not self.frames:
+            return self.system_frames
+        if not self.system_frames:
+            return self.frames
+        
+        # Convert byte frames to numpy arrays
+        mic_audio = np.frombuffer(b''.join(self.frames), dtype=np.int16)
+        system_audio = np.frombuffer(b''.join(self.system_frames), dtype=np.int16)
+        
+        # Pad the shorter array to match the longer one
+        min_len = min(len(mic_audio), len(system_audio))
+        max_len = max(len(mic_audio), len(system_audio))
+        
+        # Trim both to same length (use shorter length to avoid overflow)
+        mic_audio = mic_audio[:min_len]
+        system_audio = system_audio[:min_len]
+        
+        # Mix the audio (average to prevent clipping)
+        mixed = ((mic_audio.astype(np.int32) + system_audio.astype(np.int32)) // 2).astype(np.int16)
+        
+        # Convert back to bytes
+        return [mixed.tobytes()]
             
     def _transcribe_audio(self):
         """Transcribe the recorded audio using open-source Whisper"""
@@ -488,8 +703,18 @@ class CallRecorder:
     
     def cleanup(self):
         """Clean up audio resources"""
-        if self.stream:
-            self.stream.close()
+        if self.mic_stream:
+            try:
+                self.mic_stream.stop_stream()
+                self.mic_stream.close()
+            except:
+                pass
+        if self.stream and self.stream != self.mic_stream:
+            try:
+                self.stream.stop_stream()
+                self.stream.close()
+            except:
+                pass
         self.audio.terminate()
 
 
@@ -497,7 +722,7 @@ def main():
     print("\n" + "="*60)
     print("🎙️  CALL RECORDING & TRANSCRIPTION TOOL")
     print("="*60)
-    print("This tool records your microphone and creates transcripts")
+    print("This tool records audio and creates transcripts")
     print("Use for: meetings, interviews, call notes, etc.")
     print("="*60 + "\n")
     
@@ -516,6 +741,20 @@ def main():
             command = input("Enter command: ").strip().lower()
             
             if command == 'start':
+                # Ask for audio source
+                print("\n🎤 Select audio source:")
+                print("  1. Microphone only")
+                print("  2. System audio only (requires BlackHole on macOS)")
+                print("  3. Both microphone and system audio (recommended for calls)")
+                
+                source_choice = input("\nEnter option (1/2/3, default: 3): ").strip()
+                if source_choice == '1':
+                    audio_source = "mic"
+                elif source_choice == '2':
+                    audio_source = "system"
+                else:
+                    audio_source = "both"
+                
                 # Ask for call title (optional)
                 print("\n📝 Enter call title (optional, press Enter to skip):")
                 title = input("Title: ").strip()
@@ -523,7 +762,7 @@ def main():
                     print("ℹ️  Starting recording without title...")
                 else:
                     print(f"✅ Title set: {title}")
-                recorder.start_recording(title if title else None)
+                recorder.start_recording(title if title else None, audio_source=audio_source)
             elif command == 'stop':
                 recorder.stop_recording()
             elif command == 'transcribe' or command == 'transcrever':
