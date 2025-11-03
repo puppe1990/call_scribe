@@ -566,36 +566,60 @@ def main():
                 elif choice == '3':
                     # Browse folders in audio directory
                     base_folder = recorder.audio_folder
+                    
+                    # Check for audio files in root folder
+                    root_audio_files = recorder._get_audio_files(base_folder)
                     folders = recorder._list_folders(base_folder)
                     
-                    if not folders:
-                        print(f"\n❌ No folders found in {base_folder}")
+                    if not folders and not root_audio_files:
+                        print(f"\n❌ No folders or audio files found in {base_folder}")
                         continue
                     
-                    print(f"\n📂 Available folders in '{base_folder}':")
-                    for i, folder in enumerate(folders, 1):
+                    print(f"\n📂 Available options in '{base_folder}':")
+                    item_index = 1
+                    items_list = []
+                    
+                    # Add root folder option if it has audio files
+                    if root_audio_files:
+                        print(f"  {item_index}. 📁 {base_folder} (root) - {len(root_audio_files)} audio file(s)")
+                        items_list.append(('root', base_folder))
+                        item_index += 1
+                    
+                    # Add subfolders
+                    for folder in folders:
                         folder_path = os.path.join(base_folder, folder)
                         audio_files = recorder._get_audio_files(folder_path)
-                        print(f"  {i}. {folder} ({len(audio_files)} audio file(s))")
+                        print(f"  {item_index}. 📁 {folder} ({len(audio_files)} audio file(s))")
+                        items_list.append(('folder', folder_path))
+                        item_index += 1
                     
-                    folder_input = input("\nEnter folder number or name: ").strip()
+                    folder_input = input("\nEnter option number or folder name: ").strip()
                     
-                    selected_folder = None
+                    selected_item = None
                     if folder_input.isdigit():
                         idx = int(folder_input) - 1
-                        if 0 <= idx < len(folders):
-                            selected_folder = folders[idx]
+                        if 0 <= idx < len(items_list):
+                            selected_item = items_list[idx]
                     else:
-                        if folder_input in folders:
-                            selected_folder = folder_input
+                        # Try to match by folder name
+                        for item_type, item_path in items_list:
+                            if item_type == 'folder' and os.path.basename(item_path) == folder_input:
+                                selected_item = (item_type, item_path)
+                                break
+                        # Also check if it's "root" or base folder name
+                        if not selected_item and folder_input.lower() in ['root', '.', base_folder]:
+                            for item_type, item_path in items_list:
+                                if item_type == 'root':
+                                    selected_item = (item_type, item_path)
+                                    break
                     
-                    if selected_folder:
-                        folder_path = os.path.join(base_folder, selected_folder)
+                    if selected_item:
+                        folder_path = selected_item[1]
                         print("\n📝 Enter title (optional, press Enter to skip):")
                         title = input("Title: ").strip() or None
                         recorder.transcribe_folder(folder_path, title=title)
                     else:
-                        print("❌ Invalid folder selection")
+                        print("❌ Invalid selection")
                 else:
                     print("❌ Invalid option")
             
