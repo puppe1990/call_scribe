@@ -52,6 +52,9 @@ class CallRecorder:
         self.mic_stream = None
         self.system_stream = None
         self.system_frames = []
+        self.system_device_index = None
+        self.use_sounddevice_for_system = False
+        self.system_sample_rate = self.RATE
         
         # Language setting (default: Portuguese)
         self.language = language
@@ -84,27 +87,128 @@ class CallRecorder:
         except Exception as e:
             print(f"⚠️  Error getting audio devices: {e}")
         return devices
-    
+
+    def _normalize_device_name(self, name):
+        """Normalize device names for reliable comparison"""
+        if not name:
+            return ""
+        return ''.join(ch for ch in name.lower() if ch.isalnum())
+
     def _find_loopback_device(self):
         """Find a loopback device (like BlackHole) for system audio recording"""
-        if not SOUNDDEVICE_AVAILABLE:
-            return None
-        
+        loopback_keywords = ['blackhole', 'loopback', 'soundflower', 'monitor', 'virtual']
+
+        print("\n🔍 Procurando dispositivos de loopback...")
+
+        candidates = []
+        pyaudio_devices = []
+
         try:
-            devices = sd.query_devices()
-            # Look for common loopback device names
-            loopback_keywords = ['blackhole', 'loopback', 'soundflower', 'monitor', 'virtual']
-            
-            for i, device in enumerate(devices):
-                device_name = device['name'].lower()
-                if device['max_input_channels'] > 0:
-                    for keyword in loopback_keywords:
-                        if keyword in device_name:
-                            return i
+            device_count = self.audio.get_device_count()
+            for i in range(device_count):
+                info = self.audio.get_device_info_by_index(i)
+                if info.get('maxInputChannels', 0) > 0:
+                    normalized = self._normalize_device_name(info.get('name', ''))
+                    device_entry = {
+                        'index': i,
+                        'name': info.get('name', f'Device {i}') or f'Device {i}',
+                        'normalized': normalized,
+                        'channels': int(info.get('maxInputChannels', 0)),
+                        'default_samplerate': int(info.get('defaultSampleRate', self.RATE)) if info.get('defaultSampleRate') else None,
+                    }
+                    pyaudio_devices.append(device_entry)
+                    if any(keyword in normalized for keyword in loopback_keywords):
+                        candidates.append({
+                            'display_name': device_entry['name'],
+                            'normalized': normalized,
+                            'pyaudio_index': device_entry['index'],
+                            'channels': device_entry['channels'],
+                            'default_samplerate': device_entry['default_samplerate'],
+                            'sounddevice_index': None,
+                        })
         except Exception as e:
-            print(f"⚠️  Error finding loopback device: {e}")
-        
-        return None
+            print(f"⚠️  Erro ao verificar dispositivos PyAudio: {e}")
+
+        sd_devices_map = {}
+        if SOUNDDEVICE_AVAILABLE:
+            try:
+                devices = sd.query_devices()
+                for i, device in enumerate(devices):
+                    if device['max_input_channels'] > 0:
+                        normalized = self._normalize_device_name(device['name'])
+                        sd_devices_map[normalized] = {
+                            'index': i,
+                            'name': device['name'],
+                            'channels': int(device['max_input_channels']),
+                            'default_samplerate': int(device['default_samplerate']),
+                        }
+                        if any(keyword in normalized for keyword in loopback_keywords):
+                            if not any(c['normalized'] == normalized for c in candidates):
+                                candidates.append({
+                                    'display_name': device['name'],
+                                    'normalized': normalized,
+                                    'pyaudio_index': None,
+                                    'channels': int(device['max_input_channels']),
+                                    'default_samplerate': int(device['default_samplerate']),
+                                    'sounddevice_index': i,
+                                })
+            except Exception as e:
+                print(f"⚠️  Erro ao verificar dispositivos sounddevice: {e}")
+        else:
+            print("⚠️  sounddevice não está disponível. Instale com: pip install sounddevice")
+
+        if not candidates:
+            print("   ❌ Nenhum dispositivo de loopback encontrado!")
+            print("\n⚠️  DIAGNÓSTICO:")
+            print("   1. Verifique se BlackHole está instalado")
+            print("   2. Execute 'devices' para ver todos os dispositivos")
+            print("   3. Verifique se BlackHole está configurado como saída no Sistema")
+            return None
+
+        # Enrich candidates with missing indices/info by matching normalized names
+        for candidate in candidates:
+            normalized = candidate['normalized']
+            if candidate.get('sounddevice_index') is None and normalized in sd_devices_map:
+                info = sd_devices_map[normalized]
+                candidate['sounddevice_index'] = info['index']
+                candidate['display_name'] = info['name']
+                candidate['channels'] = info['channels']
+                candidate['default_samplerate'] = info['default_samplerate']
+            if candidate.get('pyaudio_index') is None:
+                for device_entry in pyaudio_devices:
+                    if device_entry['normalized'] == normalized:
+                        candidate['pyaudio_index'] = device_entry['index']
+                        candidate['display_name'] = device_entry['name']
+                        candidate['channels'] = device_entry['channels']
+                        candidate['default_samplerate'] = device_entry['default_samplerate']
+                        break
+
+        for candidate in candidates:
+            idx_info = []
+            if candidate.get('pyaudio_index') is not None:
+                idx_info.append(f"PyAudio #{candidate['pyaudio_index']}")
+            if candidate.get('sounddevice_index') is not None:
+                idx_info.append(f"sounddevice #{candidate['sounddevice_index']}")
+            idx_str = ', '.join(idx_info) if idx_info else 'sem índice disponível'
+            samplerate = candidate.get('default_samplerate')
+            samplerate_str = f"{samplerate} Hz" if samplerate else "desconhecida"
+            print(f"   ✅ Encontrado: [{idx_str}] {candidate['display_name']} (taxa padrão: {samplerate_str})")
+
+        def candidate_score(entry):
+            name = entry['display_name'].lower()
+            score = 0
+            if 'blackhole' in name:
+                score += 5
+            if '2ch' in name:
+                score += 2
+            if 'loopback' in name or 'monitor' in name or 'virtual' in name:
+                score += 1
+            if entry.get('pyaudio_index') is not None:
+                score += 2
+            return score
+
+        best_candidate = max(candidates, key=candidate_score)
+        return best_candidate
     
     def _load_model(self):
         """Load or reload the Whisper model"""
@@ -142,15 +246,8 @@ class CallRecorder:
         
         # Check if system audio is requested but sounddevice is not available
         if audio_source in ["system", "both"] and not SOUNDDEVICE_AVAILABLE:
-            print("⚠️  System audio recording requires sounddevice.")
-            print("   Install with: pip install sounddevice")
-            if audio_source == "system":
-                print("❌ Cannot record system audio. Please install sounddevice or use 'mic'.")
-                return
-            else:
-                print("⚠️  Falling back to microphone only.")
-                audio_source = "mic"
-                self.audio_source = "mic"
+            print("⚠️  sounddevice não está instalado. Tentaremos capturar usando apenas PyAudio.")
+            print("   Instale com: pip install sounddevice (recomendado para fallback)")
         
         # Store call title
         self.call_title = title.strip() if title and title.strip() else None
@@ -176,6 +273,10 @@ class CallRecorder:
         
         self.frames = []
         self.system_frames = []
+        self.system_stream = None
+        self.system_device_index = None
+        self.use_sounddevice_for_system = False
+        self.system_sample_rate = self.RATE
         self.is_recording = True
         
         # Open microphone stream if needed
@@ -196,34 +297,103 @@ class CallRecorder:
         # Open system audio stream if needed
         if audio_source in ["system", "both"]:
             try:
-                loopback_device = self._find_loopback_device()
-                if loopback_device is None:
-                    print("⚠️  No loopback device found (like BlackHole).")
-                    print("   For macOS, install BlackHole: https://github.com/ExistentialAudio/BlackHole")
-                    print("   Then set it as your output device in System Preferences > Sound")
+                print("\n🔧 Configurando gravação de áudio do sistema...")
+                loopback_info = self._find_loopback_device()
+                if loopback_info is None:
+                    print("\n❌ PROBLEMA: Dispositivo de loopback não encontrado!")
+                    print("\n📋 SOLUÇÃO:")
+                    print("   1. Instale BlackHole: https://github.com/ExistentialAudio/BlackHole/releases")
+                    print("   2. Execute: ./setup_audio.sh")
+                    print("   3. Configure a saída do sistema para BlackHole 2ch")
+                    print("   4. Execute 'devices' para verificar se foi detectado")
                     if audio_source == "system":
-                        print("❌ Cannot record system audio without loopback device.")
+                        print("\n❌ Não é possível gravar áudio do sistema sem dispositivo de loopback.")
                         self.is_recording = False
                         if self.mic_stream:
                             self.mic_stream.close()
                         return
                     else:
-                        print("⚠️  Falling back to microphone only.")
+                        print("\n⚠️  Continuando apenas com microfone...")
                         self.audio_source = "mic"
                 else:
-                    # Use sounddevice for system audio recording
-                    device_info = sd.query_devices(loopback_device)
-                    print(f"📢 Using loopback device: {device_info['name']}")
-                    self.system_stream = loopback_device
+                    device_name = loopback_info.get('display_name', 'Loopback')
+                    default_rate = loopback_info.get('default_samplerate')
+                    channels = loopback_info.get('channels', self.CHANNELS)
+                    print(f"✅ Usando dispositivo de loopback: {device_name}")
+                    if channels:
+                        print(f"   Canais: {channels}")
+                    if default_rate:
+                        print(f"   Sample Rate padrão: {default_rate} Hz")
+                    
+                    print("\n⚠️  IMPORTANTE:")
+                    print("   Certifique-se de que BlackHole está configurado como")
+                    print("   dispositivo de SAÍDA no Sistema > Som")
+                    print("   Caso contrário, não haverá áudio para gravar!")
+
+                    pyaudio_index = loopback_info.get('pyaudio_index')
+                    stream_opened = False
+                    last_error = None
+
+                    if pyaudio_index is not None:
+                        candidate_rates = [self.RATE]
+                        if default_rate and default_rate not in candidate_rates:
+                            candidate_rates.append(int(default_rate))
+                        for fallback_rate in [44100, 48000, 32000, 16000]:
+                            if fallback_rate not in candidate_rates:
+                                candidate_rates.append(fallback_rate)
+                        candidate_rates = [rate for rate in candidate_rates if rate]
+
+                        for rate in candidate_rates:
+                            try:
+                                stream = self.audio.open(
+                                    format=self.FORMAT,
+                                    channels=self.CHANNELS,
+                                    rate=rate,
+                                    input=True,
+                                    frames_per_buffer=self.CHUNK,
+                                    input_device_index=pyaudio_index
+                                )
+                                self.system_stream = stream
+                                self.system_sample_rate = int(rate)
+                                self.use_sounddevice_for_system = False
+                                stream_opened = True
+                                print(f"\n🎧 Capturando áudio do sistema via PyAudio (taxa: {rate} Hz)")
+                                break
+                            except Exception as stream_error:
+                                last_error = stream_error
+
+                        if not stream_opened and last_error:
+                            print(f"⚠️  Falha ao abrir PyAudio (último erro: {last_error})")
+
+                    if not stream_opened:
+                        sounddevice_index = loopback_info.get('sounddevice_index')
+                        if SOUNDDEVICE_AVAILABLE and sounddevice_index is not None:
+                            self.use_sounddevice_for_system = True
+                            self.system_device_index = sounddevice_index
+                            self.system_sample_rate = int(default_rate) if default_rate else self.RATE
+                            print("🎧 Capturando áudio do sistema via sounddevice")
+                        else:
+                            print("\n❌ Não foi possível configurar a captura de áudio do sistema.")
+                            if audio_source == "system":
+                                print("   Dica: verifique permissões de microfone e reinstale o driver BlackHole")
+                                self.is_recording = False
+                                if self.mic_stream:
+                                    self.mic_stream.close()
+                                return
+                            else:
+                                print("   Continuando apenas com microfone...")
+                                self.audio_source = "mic"
             except Exception as e:
-                print(f"❌ Error setting up system audio: {e}")
+                print(f"\n❌ Erro ao configurar áudio do sistema: {e}")
+                import traceback
+                traceback.print_exc()
                 if audio_source == "system":
                     self.is_recording = False
                     if self.mic_stream:
                         self.mic_stream.close()
                     return
                 else:
-                    print("⚠️  Falling back to microphone only.")
+                    print("⚠️  Continuando apenas com microfone...")
                     self.audio_source = "mic"
         
         # Set stream for backward compatibility
@@ -254,7 +424,7 @@ class CallRecorder:
             mic_thread.start()
             self.recording_threads.append(mic_thread)
         
-        if self.system_stream is not None:
+        if self.system_stream is not None or self.use_sounddevice_for_system:
             system_thread = threading.Thread(target=self._record_system, daemon=True)
             system_thread.start()
             self.recording_threads.append(system_thread)
@@ -303,47 +473,105 @@ class CallRecorder:
             print(f"❌ Microphone recording error: {e}")
     
     def _record_system(self):
-        """Internal method to record system audio using sounddevice"""
-        if not SOUNDDEVICE_AVAILABLE or self.system_stream is None:
-            return
-        
-        try:
-            def callback(indata, frames, time_info, status):
-                if status:
-                    print(f"⚠️  System audio status: {status}")
-                if self.is_recording:
-                    # Handle mono channel if needed
-                    if indata.shape[1] > 1:
-                        # Convert stereo to mono by averaging channels
-                        audio_mono = np.mean(indata, axis=1, keepdims=True)
+        """Internal method to record system audio"""
+        system_rate = self.system_sample_rate or self.RATE
+        max_silent_frames = max(int((system_rate / self.CHUNK) * 3), 1)
+        silent_frames = 0
+        frames_count = 0
+
+        if self.use_sounddevice_for_system:
+            if not SOUNDDEVICE_AVAILABLE or self.system_device_index is None:
+                print("⚠️  Não é possível gravar áudio do sistema (sounddevice indisponível)")
+                return
+
+            try:
+                def callback(indata, frames, time_info, status):
+                    nonlocal silent_frames, frames_count
+
+                    if status:
+                        print(f"\n⚠️  Status do áudio do sistema: {status}")
+
+                    if not self.is_recording:
+                        return (None, sd.CallbackStop)
+
+                    frames_count += 1
+
+                    audio_buffer = indata
+                    if audio_buffer.ndim > 1 and audio_buffer.shape[1] > 1:
+                        audio_buffer = np.mean(audio_buffer, axis=1, keepdims=True)
+
+                    audio_level = np.abs(audio_buffer).max()
+                    if audio_level < 0.001:
+                        silent_frames += 1
+                        if silent_frames == max_silent_frames:
+                            print("\n⚠️  AVISO: Áudio do sistema parece estar silencioso!")
+                            print("   Verifique se BlackHole está como saída e se há áudio tocando")
                     else:
-                        audio_mono = indata
-                    
-                    # Apply gain boost to match perceived volume (2x gain)
-                    # This compensates for lower system audio levels
-                    audio_gained = audio_mono * 2.0
-                    
-                    # Clip to prevent distortion
-                    audio_gained = np.clip(audio_gained, -1.0, 1.0)
-                    
-                    # Convert float32 to int16 with full scale
+                        silent_frames = 0
+
+                    audio_gained = np.clip(audio_buffer * 2.0, -1.0, 1.0)
                     audio_data = (audio_gained * 32767).astype(np.int16)
-                    
-                    # Convert to bytes
-                    audio_bytes = audio_data.tobytes()
-                    self.system_frames.append(audio_bytes)
-                return (None, sd.CallbackContinue)
-            
-            with sd.InputStream(device=self.system_stream, 
-                               channels=self.CHANNELS,
-                               samplerate=self.RATE,
-                               callback=callback,
-                               blocksize=self.CHUNK,
-                               dtype='float32'):
-                while self.is_recording:
-                    time.sleep(0.1)
+                    self.system_frames.append(audio_data.tobytes())
+                    return (None, sd.CallbackContinue)
+
+                print("🎙️  Iniciando gravação de áudio do sistema (sounddevice)...")
+                with sd.InputStream(
+                    device=self.system_device_index,
+                    channels=self.CHANNELS,
+                    samplerate=system_rate,
+                    callback=callback,
+                    blocksize=self.CHUNK,
+                    dtype='float32'
+                ):
+                    while self.is_recording:
+                        time.sleep(0.1)
+
+                if len(self.system_frames) == 0:
+                    print("\n❌ ERRO: Nenhum áudio do sistema foi gravado!")
+                    print("   O dispositivo pode não estar recebendo áudio.")
+            except Exception as e:
+                print(f"\n❌ Erro ao gravar áudio do sistema: {e}")
+                import traceback
+                traceback.print_exc()
+            return
+
+        if not self.system_stream:
+            print("⚠️  Não há stream de áudio do sistema configurado")
+            return
+
+        try:
+            print("🎙️  Iniciando gravação de áudio do sistema (PyAudio)...")
+            while self.is_recording:
+                try:
+                    data = self.system_stream.read(self.CHUNK, exception_on_overflow=False)
+                except Exception as e:
+                    print(f"\n⚠️  Falha ao ler áudio do sistema: {e}")
+                    break
+
+                frames_count += 1
+                audio_np = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+                if audio_np.size == 0:
+                    continue
+
+                audio_level = np.abs(audio_np).max()
+                if audio_level < 200:
+                    silent_frames += 1
+                    if silent_frames == max_silent_frames:
+                        print("\n⚠️  AVISO: Áudio do sistema parece estar silencioso!")
+                        print("   Verifique se BlackHole está configurado e se há áudio tocando")
+                else:
+                    silent_frames = 0
+
+                boosted = np.clip(audio_np * 1.5, -32767, 32767).astype(np.int16)
+                self.system_frames.append(boosted.tobytes())
+
+            if len(self.system_frames) == 0:
+                print("\n❌ ERRO: Nenhum áudio do sistema foi gravado!")
+                print("   O dispositivo pode não estar recebendo áudio.")
         except Exception as e:
-            print(f"❌ System audio recording error: {e}")
+            print(f"\n❌ Erro ao gravar áudio do sistema: {e}")
+            import traceback
+            traceback.print_exc()
             
     def stop_recording(self):
         """Stop recording and save audio file"""
@@ -387,8 +615,22 @@ class CallRecorder:
             self.mic_stream.close()
             self.mic_stream = None
         
-        # Note: sounddevice stream is closed automatically when exiting context
+        if self.system_stream and not self.use_sounddevice_for_system:
+            try:
+                if self.system_stream.is_active():
+                    self.system_stream.stop_stream()
+            except Exception:
+                pass
+            try:
+                self.system_stream.close()
+            except Exception:
+                pass
+
+        # Reset system audio state (sounddevice stream closes automatically)
         self.system_stream = None
+        self.system_device_index = None
+        self.use_sounddevice_for_system = False
+        self.system_sample_rate = self.RATE
         self.stream = None
         
         # Save audio file
@@ -453,76 +695,120 @@ class CallRecorder:
         self.loader_active = False
         if self.loader_thread:
             self.loader_thread.join(timeout=0.5)
+
+    def _resample_audio(self, audio_array, original_rate, target_rate):
+        """Resample audio array to the desired sample rate using linear interpolation"""
+        if original_rate == target_rate or audio_array.size == 0:
+            return audio_array
+        if original_rate <= 0 or target_rate <= 0:
+            return audio_array
+
+        duration = len(audio_array) / float(original_rate)
+        if duration <= 0:
+            return np.array([], dtype=np.int16)
+
+        target_length = int(round(duration * target_rate))
+        if target_length <= 0:
+            return np.array([], dtype=np.int16)
+
+        original_times = np.linspace(0.0, duration, num=len(audio_array), endpoint=False)
+        target_times = np.linspace(0.0, duration, num=target_length, endpoint=False)
+
+        resampled = np.interp(target_times, original_times, audio_array.astype(np.float32))
+        resampled = np.clip(resampled, -32767, 32767)
+        return resampled.astype(np.int16)
+
+    def _get_mic_audio_array(self):
+        """Return microphone audio as numpy array and its sample rate"""
+        if not self.frames:
+            return np.array([], dtype=np.int16), self.RATE
+        mic_audio = np.frombuffer(b''.join(self.frames), dtype=np.int16)
+        return mic_audio, self.RATE
+
+    def _get_system_audio_array(self, target_rate=None):
+        """Return system audio as numpy array and the sample rate used"""
+        original_rate = self.system_sample_rate or self.RATE
+        if not self.system_frames:
+            rate = target_rate if target_rate is not None else original_rate
+            return np.array([], dtype=np.int16), rate
+
+        system_audio = np.frombuffer(b''.join(self.system_frames), dtype=np.int16)
+        if target_rate is not None and target_rate != original_rate:
+            system_audio = self._resample_audio(system_audio, original_rate, target_rate)
+            return system_audio, target_rate
+        return system_audio, original_rate
     
     def _save_audio(self):
         """Save recorded audio to WAV file, mixing if both sources are recorded"""
         try:
-            self._start_loader("💾 Saving audio file...")
-            
-            # Determine which frames to use
+            self._start_loader("💾 Salvando arquivo de áudio...")
+            final_audio = np.array([], dtype=np.int16)
+            final_rate = self.RATE
+
             if self.audio_source == "mic":
-                audio_frames = self.frames
+                final_audio, final_rate = self._get_mic_audio_array()
+                print(f"\n📊 Microfone: {len(self.frames)} frames gravados")
             elif self.audio_source == "system":
-                audio_frames = self.system_frames
+                final_audio, final_rate = self._get_system_audio_array()
+                print(f"\n📊 Sistema: {len(self.system_frames)} frames gravados")
             else:  # both
-                # Mix microphone and system audio
-                audio_frames = self._mix_audio()
-            
+                print(f"\n📊 Microfone: {len(self.frames)} frames")
+                print(f"📊 Sistema: {len(self.system_frames)} frames")
+
+                if len(self.system_frames) == 0:
+                    print("\n⚠️  AVISO: Nenhum áudio do sistema foi gravado!")
+                    print("   Isso significa que apenas o microfone foi capturado.")
+                    print("   Verifique a configuração do BlackHole.")
+
+                final_audio, final_rate = self._mix_audio()
+
+            if final_audio.size == 0:
+                print("\n❌ ERRO: Nenhum áudio para salvar!")
+                return
+
             wf = wave.open(self.audio_filename, 'wb')
             wf.setnchannels(self.CHANNELS)
             wf.setsampwidth(self.audio.get_sample_size(self.FORMAT))
-            wf.setframerate(self.RATE)
-            wf.writeframes(b''.join(audio_frames))
+            wf.setframerate(int(final_rate))
+            wf.writeframes(final_audio.astype(np.int16).tobytes())
             wf.close()
             self._stop_loader()
-            print(f"💾 Audio saved successfully")
+            print(f"💾 Áudio salvo com sucesso")
         except Exception as e:
             self._stop_loader()
-            print(f"❌ Error saving audio: {e}")
+            print(f"❌ Erro ao salvar áudio: {e}")
             import traceback
             traceback.print_exc()
     
     def _mix_audio(self):
-        """Mix microphone and system audio frames"""
-        if not self.frames and not self.system_frames:
-            return []
-        
-        if not self.frames:
-            return self.system_frames
-        if not self.system_frames:
-            return self.frames
-        
-        # Convert byte frames to numpy arrays
-        mic_audio = np.frombuffer(b''.join(self.frames), dtype=np.int16)
-        system_audio = np.frombuffer(b''.join(self.system_frames), dtype=np.int16)
-        
-        # Pad the shorter array to match the longer one
+        """Mix microphone and system audio and return array with sample rate"""
+        mic_audio, mic_rate = self._get_mic_audio_array()
+        system_audio, system_rate = self._get_system_audio_array(target_rate=mic_rate)
+
+        if mic_audio.size == 0 and system_audio.size == 0:
+            return np.array([], dtype=np.int16), mic_rate
+        if mic_audio.size == 0:
+            return system_audio, system_rate
+        if system_audio.size == 0:
+            return mic_audio, mic_rate
+
         min_len = min(len(mic_audio), len(system_audio))
-        max_len = max(len(mic_audio), len(system_audio))
-        
-        # Trim both to same length (use shorter length to avoid overflow)
         mic_audio = mic_audio[:min_len]
         system_audio = system_audio[:min_len]
-        
-        # Normalize both audio sources before mixing to prevent clipping
-        # Find peak levels
+
         mic_peak = np.abs(mic_audio).max()
         system_peak = np.abs(system_audio).max()
-        
-        # Normalize to prevent clipping (target peak is 80% of max to leave headroom)
+
         target_peak = int(32767 * 0.8)
-        
+
         if mic_peak > 0:
             mic_audio = (mic_audio.astype(np.float32) * (target_peak / mic_peak)).astype(np.int16)
         if system_peak > 0:
             system_audio = (system_audio.astype(np.float32) * (target_peak / system_peak)).astype(np.int16)
-        
-        # Mix the audio (sum and clip to prevent overflow)
+
         mixed = mic_audio.astype(np.int32) + system_audio.astype(np.int32)
         mixed = np.clip(mixed, -32767, 32767).astype(np.int16)
-        
-        # Convert back to bytes
-        return [mixed.tobytes()]
+        return mixed, mic_rate
             
     def _transcribe_audio(self):
         """Transcribe the recorded audio using open-source Whisper"""
