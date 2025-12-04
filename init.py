@@ -3,9 +3,9 @@
 Audio Recorder and Transcriber using Whisper
 Make sure to run this with the virtual environment activated:
     source venv/bin/activate
-    python3 test.py
+    python3 init.py
 Or use the venv Python directly:
-    venv/bin/python test.py
+    venv/bin/python init.py
 """
 
 import pyaudio
@@ -21,9 +21,9 @@ class AudioRecorderTranscriber:
     def __init__(self, model_size="base"):
         """
         Inicializa o gravador e transcritor de áudio.
-        
+
         Args:
-            model_size: Tamanho do modelo Whisper (tiny, base, small, medium, large)
+            model_size: Tamanho padrão do modelo Whisper (tiny, base, small, medium, large)
         """
         self.chunk = 1024
         self.format = pyaudio.paInt16
@@ -32,13 +32,32 @@ class AudioRecorderTranscriber:
         self.recording = False
         self.frames = []
         self.start_time = None
-        
-        print(f"Carregando modelo Whisper '{model_size}'...")
-        self.model = whisper.load_model(model_size)
-        print("Modelo carregado com sucesso!")
-        
+        self.model_size = model_size
+        self.model = None
+        self.loaded_model_name = None
+
         self.audio = pyaudio.PyAudio()
-        
+
+    def _load_model(self, model_size=None):
+        """Carrega o modelo Whisper apenas quando necessário"""
+        requested_model = model_size or self.model_size
+
+        if self.model and self.loaded_model_name == requested_model:
+            return self.model
+
+        print(f"Carregando modelo Whisper '{requested_model}'...")
+        try:
+            self.model_size = requested_model
+            self.model = whisper.load_model(requested_model)
+            self.loaded_model_name = requested_model
+            print("Modelo carregado com sucesso!")
+        except Exception as e:
+            print(f"❌ Não foi possível carregar o modelo '{requested_model}': {e}")
+            self.model = None
+            self.loaded_model_name = None
+
+        return self.model
+
     def _format_time(self, seconds):
         """Formata o tempo em MM:SS ou HH:MM:SS"""
         hours = int(seconds // 3600)
@@ -133,7 +152,7 @@ class AudioRecorderTranscriber:
         print(f"✅ Áudio salvo: {filepath}")
         return filepath
     
-    def transcribe_audio(self, audio_file, language="pt"):
+    def transcribe_audio(self, audio_file, language="pt", model_size=None):
         """
         Transcreve um arquivo de áudio usando Whisper
         
@@ -142,9 +161,14 @@ class AudioRecorderTranscriber:
             language: Idioma do áudio (pt, en, es, etc.)
         """
         print(f"\n🎯 Transcrevendo áudio: {audio_file}")
+
+        model = self._load_model(model_size=model_size)
+        if not model:
+            print("❌ Não foi possível carregar um modelo para transcrição.")
+            return None
         
         try:
-            result = self.model.transcribe(
+            result = model.transcribe(
                 audio_file,
                 language=language,
                 fp16=False,
@@ -187,7 +211,7 @@ class AudioRecorderTranscriber:
         audio_file = self.save_audio()
         return audio_file
     
-    def record_and_transcribe(self, language="pt"):
+    def record_and_transcribe(self, language="pt", model_size=None):
         """Grava áudio e transcreve automaticamente"""
         # Iniciar gravação em thread separada
         record_thread = threading.Thread(target=self.start_recording, daemon=True)
@@ -208,19 +232,33 @@ class AudioRecorderTranscriber:
         
         if audio_file:
             # Transcrever
-            self.transcribe_audio(audio_file, language=language)
+            self.transcribe_audio(audio_file, language=language, model_size=model_size)
     
-    def transcribe_existing_file(self, filepath, language="pt"):
+    def transcribe_existing_file(self, filepath, language="pt", model_size=None):
         """Transcreve um arquivo de áudio existente"""
         if not os.path.exists(filepath):
             print(f"❌ Arquivo não encontrado: {filepath}")
             return None
         
-        return self.transcribe_audio(filepath, language=language)
+        return self.transcribe_audio(filepath, language=language, model_size=model_size)
     
     def close(self):
         """Fecha recursos"""
         self.audio.terminate()
+
+
+def escolher_modelo():
+    """Exibe o menu de modelos e retorna o modelo escolhido"""
+    print("\nTamanhos de modelo disponíveis:")
+    print("1. tiny   - Rápido, menos preciso")
+    print("2. base   - Balanceado (recomendado)")
+    print("3. small  - Mais preciso, mais lento")
+    print("4. medium - Muito preciso, lento")
+    print("5. large  - Máxima precisão, muito lento")
+
+    escolha = input("\nEscolha o modelo (1-5) [2]: ").strip() or "2"
+    modelos = {"1": "tiny", "2": "base", "3": "small", "4": "medium", "5": "large"}
+    return modelos.get(escolha, "base")
 
 
 def main():
@@ -228,21 +266,8 @@ def main():
     print("=" * 50)
     print("🎤 Sistema de Gravação e Transcrição com Whisper")
     print("=" * 50)
-    
-    # Escolher tamanho do modelo
-    print("\nTamanhos de modelo disponíveis:")
-    print("1. tiny   - Rápido, menos preciso")
-    print("2. base   - Balanceado (recomendado)")
-    print("3. small  - Mais preciso, mais lento")
-    print("4. medium - Muito preciso, lento")
-    print("5. large  - Máxima precisão, muito lento")
-    
-    model_choice = input("\nEscolha o modelo (1-5) [2]: ").strip() or "2"
-    models = {"1": "tiny", "2": "base", "3": "small", "4": "medium", "5": "large"}
-    model_size = models.get(model_choice, "base")
-    
-    # Inicializar sistema
-    recorder = AudioRecorderTranscriber(model_size=model_size)
+
+    recorder = AudioRecorderTranscriber()
     
     while True:
         print("\n" + "=" * 50)
@@ -256,10 +281,11 @@ def main():
         choice = input("\nOpção: ").strip()
         
         if choice == "1":
+            modelo = escolher_modelo()
             language = input("Idioma (pt/en/es) [pt]: ").strip() or "pt"
             print("\nPressione ENTER para parar a gravação")
             input("Pressione ENTER para começar a gravar...")
-            recorder.record_and_transcribe(language=language)
+            recorder.record_and_transcribe(language=language, model_size=modelo)
             
         elif choice == "2":
             print("\nPressione ENTER para parar a gravação")
@@ -268,8 +294,9 @@ def main():
             
         elif choice == "3":
             filepath = input("Caminho do arquivo de áudio: ").strip()
+            modelo = escolher_modelo()
             language = input("Idioma (pt/en/es) [pt]: ").strip() or "pt"
-            recorder.transcribe_existing_file(filepath, language=language)
+            recorder.transcribe_existing_file(filepath, language=language, model_size=modelo)
             
         elif choice == "4":
             print("\n👋 Encerrando...")
