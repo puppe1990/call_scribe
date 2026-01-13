@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import datetime
 import sys
+import errno
 
 class AudioRecorderTranscriber:
     def __init__(self, model_size="base"):
@@ -142,15 +143,49 @@ class AudioRecorderTranscriber:
         os.makedirs("gravacoes", exist_ok=True)
         filepath = os.path.join("gravacoes", filename)
         
-        wf = wave.open(filepath, 'wb')
-        wf.setnchannels(self.channels)
-        wf.setsampwidth(self.audio.get_sample_size(self.format))
-        wf.setframerate(self.rate)
-        wf.writeframes(b''.join(self.frames))
-        wf.close()
+        # Tentar salvar o áudio, com tratamento especial para erro de espaço em disco
+        max_retries = 10
+        retry_count = 0
         
-        print(f"✅ Áudio salvo: {filepath}")
-        return filepath
+        while retry_count < max_retries:
+            try:
+                wf = wave.open(filepath, 'wb')
+                wf.setnchannels(self.channels)
+                wf.setsampwidth(self.audio.get_sample_size(self.format))
+                wf.setframerate(self.rate)
+                wf.writeframes(b''.join(self.frames))
+                wf.close()
+                
+                print(f"✅ Áudio salvo: {filepath}")
+                return filepath
+                
+            except OSError as e:
+                if e.errno == errno.ENOSPC:  # No space left on device
+                    print(f"\n❌ Erro: [Errno {e.errno}] No space left on device: '{filepath}'")
+                    print("\n⚠️  ATENÇÃO: O áudio gravado foi preservado na memória.")
+                    print("   Por favor, libere espaço em disco e pressione ENTER para tentar salvar novamente.")
+                    print("   (O áudio não será descartado até ser salvo com sucesso)\n")
+                    
+                    # Aguardar o usuário resolver o problema
+                    try:
+                        input("Pressione ENTER quando tiver liberado espaço em disco... ")
+                        retry_count += 1
+                        print(f"\n🔄 Tentando salvar novamente (tentativa {retry_count}/{max_retries})...")
+                        continue
+                    except (EOFError, KeyboardInterrupt):
+                        print("\n⚠️  Operação cancelada pelo usuário. O áudio ainda está na memória.")
+                        return None
+                else:
+                    # Outro erro de OSError, propagar normalmente
+                    print(f"❌ Erro ao salvar áudio: {e}")
+                    return None
+            except Exception as e:
+                print(f"❌ Erro ao salvar áudio: {e}")
+                return None
+        
+        print(f"\n❌ Não foi possível salvar após {max_retries} tentativas.")
+        print("⚠️  O áudio ainda está na memória. Tente novamente mais tarde.")
+        return None
     
     def transcribe_audio(self, audio_file, language="pt", model_size=None):
         """
